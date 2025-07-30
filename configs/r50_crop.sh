@@ -2,7 +2,7 @@
 
 set -x
 
-EXP_DIR=exps/r50_deformable_detr_sacd
+EXP_DIR=exps/r50_sacd
 PY_ARGS=${@:1}
 
 python -u main_sacd.py \
