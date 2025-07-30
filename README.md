@@ -23,4 +23,4 @@ Follow the steps below to prepare the environment, data, and start training:
 2. Download the SACD Dataset and change the path in the main_sacd.py
 
 3. Use the following command to launch distributed training across 2 GPUs:
-   > GPUS_PER_NODE=2 ./tools/run_dist_launch.sh 2 ./configs/r50_deformable_detr_crop.sh
+   > GPUS_PER_NODE=2 ./tools/run_dist_launch.sh 2 ./configs/r50_crop.sh
