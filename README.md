@@ -9,6 +9,7 @@ Existing image cropping methods typically rely on evaluating predefined or dynam
 - Python: 3.9.7
 
   > conda create -n multi_in_one python=3.9 pip
+  > 
   > conda activate multi_in_one
 
 - PyTorch: 1.10.0 (CUDA 11.3)
