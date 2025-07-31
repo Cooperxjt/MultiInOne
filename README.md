@@ -7,15 +7,10 @@ Existing image cropping methods typically rely on evaluating predefined or dynam
 
 - Linux, CUDA>=9.2, GCC>=5.4
 - Python: 3.9.7
-
-  > conda create -n multi_in_one python=3.9 pip
-  > 
-  > conda activate multi_in_one
-
 - PyTorch: 1.10.0 (CUDA 11.3)
 - Torchvision: 0.11.0
 
-## Usage
+## Training
 
 Follow the steps below to prepare the environment, data, and start training:
 
@@ -25,3 +20,8 @@ Follow the steps below to prepare the environment, data, and start training:
 
 3. Use the following command to launch distributed training across 2 GPUs:
    > GPUS_PER_NODE=2 ./tools/run_dist_launch.sh 2 ./configs/r50_crop.sh
+
+## Testing
+Once you have obtained the trained model, modify the config for inference.  
+To run evaluation, add `--eval` and `--resume <checkpoint_path>` to the end of the command.
+
