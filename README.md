@@ -25,3 +25,7 @@ Follow the steps below to prepare the environment, data, and start training:
 Once you have obtained the trained model, modify the config for inference.  
 To run evaluation, add `--eval` and `--resume <checkpoint_path>` to the end of the command.
 
+## More results
+![Results](figs/幻灯片11.png)
+
+
