@@ -151,7 +151,7 @@ def main(args):
 
     # Build the context model using the resume path for pretrained weights
     context_model_args = copy.deepcopy(args)
-    context_model_args.resume = 'checkpoints/r50_deformable_detr-checkpoint.pth'  # Update with your actual path
+    context_model_args.resume = './checkpoints/r50_deformable_detr-checkpoint.pth'  # Update with your actual path
     context_model_args.num_classes = 91  # Update with your actual path
     context_model_args.num_queries = 300  # Update with your actual path
     context_model_args.backbone = 'resnet50'  # Update with your actual path
