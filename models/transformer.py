@@ -260,6 +260,96 @@ class DeformableTransformerEncoder(nn.Module):
 
         return output
 
+class SCRM(nn.Module):
+    def __init__(
+            self, d_model=256, d_ffn=1024,
+            dropout=0.1, activation="relu",
+            n_levels=4, n_heads=8, n_points=4
+    ):
+        super().__init__()
+        # 上下文特征融合
+        self.context_subject = nn.Sequential(
+            nn.Linear(d_model * 2, d_model),
+            nn.ReLU(),
+            nn.Linear(d_model, d_model),
+            nn.LayerNorm(d_model)
+        )
+        # 二次自注意力
+        self.self_attn = nn.MultiheadAttention(d_model, n_heads, dropout=dropout)
+        # 二次交叉注意力
+        self.cross_attn = MSDeformAttn(d_model, n_levels, n_heads, n_points)
+        # 层归一化和Dropout
+        self.norm_self = nn.LayerNorm(d_model)
+        self.norm_cross = nn.LayerNorm(d_model)
+        self.dropout_self = nn.Dropout(dropout)
+        self.dropout_cross = nn.Dropout(dropout)
+        # 二次前馈网络
+        self.linear1 = nn.Linear(d_model, d_ffn)
+        self.activation = _get_activation_fn(activation)
+        self.dropout_ffn1 = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(d_ffn, d_model)
+        self.dropout_ffn2 = nn.Dropout(dropout)
+        self.norm_ffn = nn.LayerNorm(d_model)
+
+    @staticmethod
+    def with_pos_embed(tensor, pos):
+        """和原类保持一致的位置编码融合逻辑"""
+        return tensor if pos is None else tensor + pos
+
+    def forward_ffn(self, tgt):
+        """二次FFN前向逻辑"""
+        tgt2 = self.linear2(self.dropout_ffn1(self.activation(self.linear1(tgt))))
+        tgt = tgt + self.dropout_ffn2(tgt2)
+        tgt = self.norm_ffn(tgt)
+        return tgt
+
+    def forward(self, tgt, query_pos, reference_points, src, src_spatial_shapes, level_start_index, src_padding_mask=None, context_queries=None):
+        """
+        SCRM核心前向逻辑
+        :param tgt: 解码器输入特征 [B, N, C]
+        :param query_pos: 查询位置编码 [B, N, C]
+        :param reference_points: 参考点 [B, N, L, 2]
+        :param src: 编码器输出特征 [B, S, C]
+        :param src_spatial_shapes: 特征层空间形状 [L, 2]
+        :param level_start_index: 特征层起始索引 [L]
+        :param src_padding_mask: 源特征padding掩码 [B, S]
+        :param context_queries: 上下文查询特征 [B, N, C]
+        :return: 处理后的特征 [B, N, C]
+        """
+        if context_queries is None:
+            return tgt
+        
+        # 1. 随机打乱context_queries
+        idx = torch.randperm(context_queries.size(1))
+        shuffled_context_queries = context_queries[:, idx, :]
+
+        # 2. 拼接tgt和打乱后的上下文查询
+        tgt_context = torch.cat((tgt, shuffled_context_queries), dim=-1)
+        tgt_context = self.context_subject(tgt_context)
+
+        # 3. 二次自注意力
+        q = k = self.with_pos_embed(tgt_context, query_pos)
+        tgt_context_2 = self.self_attn(
+            q.transpose(0, 1), 
+            k.transpose(0, 1), 
+            tgt_context.transpose(0, 1)
+        )[0].transpose(0, 1)
+        tgt_context = tgt_context + self.dropout_self(tgt_context_2)
+        tgt_context = self.norm_self(tgt_context)
+
+        # 4. 二次交叉注意力
+        tgt_context_2 = self.cross_attn(
+            self.with_pos_embed(tgt_context, query_pos),
+            reference_points,
+            src, src_spatial_shapes, level_start_index, src_padding_mask
+        )
+        tgt_context = tgt_context + self.dropout_cross(tgt_context_2)
+        tgt_context = self.norm_cross(tgt_context)
+
+        # 5. 二次FFN
+        tgt_context = self.forward_ffn(tgt_context)
+
+        return tgt_context
 
 class DeformableTransformerDecoderLayer(nn.Module):
     def __init__(
@@ -269,17 +359,16 @@ class DeformableTransformerDecoderLayer(nn.Module):
     ):
         super().__init__()
 
-        # cross attention
+        # 基础注意力模块
         self.cross_attn = MSDeformAttn(d_model, n_levels, n_heads, n_points)
         self.dropout1 = nn.Dropout(dropout)
         self.norm1 = nn.LayerNorm(d_model)
 
-        # self attention
         self.self_attn = nn.MultiheadAttention(d_model, n_heads, dropout=dropout)
         self.dropout2 = nn.Dropout(dropout)
         self.norm2 = nn.LayerNorm(d_model)
 
-        # ffn
+        # 基础前馈网络
         self.linear1 = nn.Linear(d_model, d_ffn)
         self.activation = _get_activation_fn(activation)
         self.dropout3 = nn.Dropout(dropout)
@@ -287,54 +376,32 @@ class DeformableTransformerDecoderLayer(nn.Module):
         self.dropout4 = nn.Dropout(dropout)
         self.norm3 = nn.LayerNorm(d_model)
 
-        # context_subject
-        self.context_subject = nn.Sequential(
-            nn.Linear(d_model * 2, d_model),
-            nn.ReLU(),
-            nn.Linear(d_model, d_model),
-            nn.LayerNorm(d_model)
+        # 引入封装后的SCRM模块
+        self.scrm = SCRM(
+            d_model=d_model, d_ffn=d_ffn,
+            dropout=dropout, activation=activation,
+            n_levels=n_levels, n_heads=n_heads, n_points=n_points
         )
-
-        self.self_attn_2 = nn.MultiheadAttention(d_model, n_heads, dropout=dropout)
-        self.cross_attn_2 = MSDeformAttn(d_model, n_levels, n_heads, n_points)
-        self.norm4 = nn.LayerNorm(d_model)
-        self.norm5 = nn.LayerNorm(d_model)
-        self.dropout5 = nn.Dropout(dropout)
-        self.dropout6 = nn.Dropout(dropout)
-
-        # ffn_2
-        self.linear3 = nn.Linear(d_model, d_ffn)
-        self.activation2 = _get_activation_fn(activation)
-        self.dropout7 = nn.Dropout(dropout)
-        self.linear4 = nn.Linear(d_ffn, d_model)
-        self.dropout8 = nn.Dropout(dropout)
-        self.norm6 = nn.LayerNorm(d_model)
 
     @staticmethod
     def with_pos_embed(tensor, pos):
         return tensor if pos is None else tensor + pos
 
     def forward_ffn(self, tgt):
+        """基础FFN前向逻辑"""
         tgt2 = self.linear2(self.dropout3(self.activation(self.linear1(tgt))))
         tgt = tgt + self.dropout4(tgt2)
         tgt = self.norm3(tgt)
         return tgt
 
-    def forward_ffn_2(self, tgt):
-        tgt2 = self.linear4(self.dropout7(self.activation2(self.linear3(tgt))))
-        tgt = tgt + self.dropout8(tgt2)
-        tgt = self.norm6(tgt)
-        return tgt
-
     def forward(self, tgt, query_pos, reference_points, src, src_spatial_shapes, level_start_index, src_padding_mask=None, context_queries=None):
-        # self attention
+        # 1. 基础自注意力
         q = k = self.with_pos_embed(tgt, query_pos)
-
         tgt2 = self.self_attn(q.transpose(0, 1), k.transpose(0, 1), tgt.transpose(0, 1))[0].transpose(0, 1)
         tgt = tgt + self.dropout2(tgt2)
         tgt = self.norm2(tgt)
 
-        # cross attention
+        # 2. 基础交叉注意力
         tgt2 = self.cross_attn(
             self.with_pos_embed(tgt, query_pos),
             reference_points,
@@ -343,36 +410,18 @@ class DeformableTransformerDecoderLayer(nn.Module):
         tgt = tgt + self.dropout1(tgt2)
         tgt = self.norm1(tgt)
 
-        # ffn
+        # 3. 基础FFN
         tgt = self.forward_ffn(tgt)
 
-        if context_queries != None:
-            idx = torch.randperm(context_queries.size(1))
-            shuffled_context_queries = context_queries[:, idx, :]
-
-            tgt_context = torch.cat((tgt, shuffled_context_queries), dim=-1)
-            tgt_context = self.context_subject(tgt_context)
-
-            q = k = self.with_pos_embed(tgt_context, query_pos)
-            tgt_context_2 = self.self_attn_2(q.transpose(0, 1), k.transpose(0, 1), tgt_context.transpose(0, 1))[0].transpose(0, 1)
-            tgt_context = tgt_context + self.dropout5(tgt_context_2)
-            tgt_context = self.norm4(tgt_context)
-
-            # cross attention
-            tgt_context_2 = self.cross_attn_2(
-                self.with_pos_embed(tgt_context, query_pos),
-                reference_points,
-                src, src_spatial_shapes, level_start_index, src_padding_mask
+        # 4. 调用SCRM模块处理上下文查询
+        if context_queries is not None:
+            tgt = self.scrm(
+                tgt, query_pos, reference_points, src,
+                src_spatial_shapes, level_start_index,
+                src_padding_mask, context_queries
             )
-            tgt_context = tgt_context + self.dropout6(tgt_context_2)
-            tgt_context = self.norm5(tgt_context)
-
-            tgt_context = self.forward_ffn_2(tgt_context)
-
-            return tgt_context
 
         return tgt
-
 
 class DeformableTransformerDecoder(nn.Module):
     def __init__(self, decoder_layer, num_layers, return_intermediate=False):
